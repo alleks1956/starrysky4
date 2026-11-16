@@ -41,6 +41,12 @@ class MainActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var isRawSupportedOnDevice = false
 
+    // Use case'ы самой активности (превью и пробная съёмка для определения разрешения).
+    // Отпускаем только их, а не всю камеру: ProcessCameraProvider общий для всего
+    // приложения, и unbindAll() отвязал бы ещё и камеру сервиса съёмки.
+    private var previewUseCase: Preview? = null
+    private var probeCaptureUseCase: ImageCapture? = null
+
     private lateinit var viewFinder: PreviewView
     private lateinit var tvResolutionBadge: TextView
     private lateinit var btnBatteryOpt: Button
@@ -156,7 +162,9 @@ class MainActivity : AppCompatActivity() {
                         cbRaw.isEnabled = !isRunning && isRawSupportedOnDevice
 
                         if (isRunning) {
-                            cameraProvider?.unbindAll()
+                            // Раньше здесь был cameraProvider?.unbindAll(), который отвязывал
+                            // и камеру сервиса. Теперь отпускаем только своё превью.
+                            releasePreviewCamera()
                         } else if (ContextCompat.checkSelfPermission(
                                 this@MainActivity,
                                 Manifest.permission.CAMERA
@@ -170,10 +178,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Отвязывает только use case'ы активности (превью и пробную съёмку).
+    private fun releasePreviewCamera() {
+        val useCases = listOfNotNull(previewUseCase, probeCaptureUseCase)
+        if (useCases.isNotEmpty()) {
+            cameraProvider?.unbind(*useCases.toTypedArray())
+        }
+        previewUseCase = null
+        probeCaptureUseCase = null
+    }
+
     private fun startPreviewCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
             cameraProvider = cameraProviderFuture.get()
+
+            // Если съёмка уже идёт, камера принадлежит сервису: превью не включаем.
+            if (CameraForegroundService.isRunningFlow.value) {
+                return@addListener
+            }
+
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(viewFinder.surfaceProvider)
             }
@@ -187,13 +211,15 @@ class MainActivity : AppCompatActivity() {
                 .build()
 
             try {
-                cameraProvider?.unbindAll()
+                releasePreviewCamera()
                 cameraProvider?.bindToLifecycle(
                     this,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
                     probeImageCapture
                 )
+                previewUseCase = preview
+                probeCaptureUseCase = probeImageCapture
 
                 val res = probeImageCapture.resolutionInfo?.resolution
                 if (res != null) {
@@ -280,7 +306,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        cameraProvider?.unbindAll()
+        // Освобождаем камеру от превью, чтобы её занял сервис
+        releasePreviewCamera()
 
         val intent = Intent(this, CameraForegroundService::class.java).apply {
             action = CameraForegroundService.ACTION_START
