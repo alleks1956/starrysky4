@@ -54,6 +54,12 @@ class CameraForegroundService : LifecycleService() {
     private var shootingJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
+    // Счётчики результата съёмки
+    private var savedFiles = 0
+    private var errorCount = 0
+    private var lastError: String? = null
+    private var lastSavedUri: String? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -139,6 +145,10 @@ class CameraForegroundService : LifecycleService() {
 
     private fun runShootingLoop(targetTimeMs: Long, intervalSec: Long, totalCount: Int) {
         shootingJob?.cancel()
+        savedFiles = 0
+        errorCount = 0
+        lastError = null
+        lastSavedUri = null
         _isRunningFlow.value = true
         val modeLabel = if (isRawActive) "[RAW+JPG]" else "[JPG]"
 
@@ -161,9 +171,15 @@ class CameraForegroundService : LifecycleService() {
                 }
             }
 
-            // Для тяжелых DNG-файлов (20–50 МБ каждый) даем больше времени на сброс буфера на диск
-            delay(if (isRawActive) 4000L else 2000L)
-            stopSequence("Готово! Сохранено кадров: $totalCount $modeLabel")
+            // Даём время на запись файлов на диск (RAW/DNG тяжёлые: 20–50 МБ каждый)
+            delay(if (isRawActive) 6000L else 3000L)
+
+            val result = if (errorCount == 0 && savedFiles > 0) {
+                "Готово! Сохранено файлов: $savedFiles $modeLabel\n${lastSavedUri ?: ""}"
+            } else {
+                "Сохранено файлов: $savedFiles, ошибок: $errorCount $modeLabel\n${lastError ?: "Файлы не записаны"}"
+            }
+            stopSequence(result)
         }
     }
 
@@ -174,6 +190,18 @@ class CameraForegroundService : LifecycleService() {
 
         val jpegOptions = createOutputOptions(baseName, "image/jpeg")
 
+        val callback = object : ImageCapture.OnImageSavedCallback {
+            override fun onError(exc: ImageCaptureException) {
+                errorCount++
+                lastError = "Кадр $current: ${exc.message}"
+            }
+
+            override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                savedFiles++
+                lastSavedUri = output.savedUri?.toString()
+            }
+        }
+
         if (isRawActive) {
             val rawOptions = createOutputOptions(baseName, "image/x-adobe-dng")
 
@@ -182,23 +210,13 @@ class CameraForegroundService : LifecycleService() {
                 rawOptions,
                 jpegOptions,
                 ContextCompat.getMainExecutor(this),
-                object : ImageCapture.OnImageSavedCallback {
-                    override fun onError(exc: ImageCaptureException) {
-                        updateStatus("Ошибка RAW+JPG кадра $current: ${exc.message}")
-                    }
-                    override fun onImageSaved(output: ImageCapture.OutputFileResults) {}
-                }
+                callback
             )
         } else {
             capture.takePicture(
                 jpegOptions,
                 ContextCompat.getMainExecutor(this),
-                object : ImageCapture.OnImageSavedCallback {
-                    override fun onError(exc: ImageCaptureException) {
-                        updateStatus("Ошибка JPG кадра $current: ${exc.message}")
-                    }
-                    override fun onImageSaved(output: ImageCapture.OutputFileResults) {}
-                }
+                callback
             )
         }
     }
